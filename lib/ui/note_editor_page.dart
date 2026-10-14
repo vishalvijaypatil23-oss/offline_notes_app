@@ -127,11 +127,9 @@ class _NoteEditorPageState extends State<NoteEditorPage> {
               icon: const Icon(Icons.check),
               tooltip: 'Save',
               onPressed: () async {
-                final messenger = ScaffoldMessenger.of(context);
+                final navigator = Navigator.of(context);
                 await _save();
-                messenger.showSnackBar(
-                  const SnackBar(content: Text('Saved on this device')),
-                );
+                if (mounted) navigator.pop();
               },
             ),
           ],
