@@ -309,7 +309,9 @@ class SyncEngine {
         '#${entry.id} server is at v${serverRow['version']}, we sent base v${note.baseVersion} → ${switch (merge.outcome) {
           MergeOutcome.alreadyApplied => 'our change is already there (lost response), done',
           MergeOutcome.retry => 'other fields changed only, resending ${merge.toSend.keys.toList()} on top',
-          MergeOutcome.conflict => 'same field changed on both sides, asking the user',
+          MergeOutcome.conflict => serverRow['deleted'] == true
+              ? 'note was deleted on another device while edited here, asking the user'
+              : 'same field changed on both sides, asking the user',
         }}');
     return store.db.transaction((tx) async {
       switch (merge.outcome) {
