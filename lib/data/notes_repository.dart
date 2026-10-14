@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 
 import '../sync/outbox.dart';
 import '../sync/records.dart';
+import '../sync/sync_log.dart';
 import 'local_store.dart';
 import 'models.dart';
 
@@ -55,7 +56,9 @@ class NotesRepository {
       if (changes.isEmpty) return;
       await tx.update('notes', {...changes, 'updated_at': store.nowMs},
           where: 'id = ?', whereArgs: [id]);
-      await outbox.noteEdited(tx, id, changes);
+      final merged = await outbox.noteEdited(tx, id, changes);
+      store.log.add('local',
+          'note ${shortId(id)} edited ${changes.keys.toList()} → outbox: ${merged ? 'merged into queued job' : 'new update job'}');
       await records.refreshStatus(tx, id);
     });
     store.notify();
@@ -69,8 +72,12 @@ class NotesRepository {
       final cancelled = await outbox.noteDeleted(tx, id);
       if (cancelled) {
         orphanFiles.addAll(await records.purgeNote(tx, id));
+        store.log.add('local',
+            'note ${shortId(id)} deleted before it was ever sent → create and delete cancel out, nothing goes to the server');
         return;
       }
+      store.log.add('local',
+          'note ${shortId(id)} hidden locally → outbox: delete (removed for good once the server accepts it)');
       await tx.update('notes', {'deleted': 1, 'updated_at': store.nowMs},
           where: 'id = ?', whereArgs: [id]);
       await records.refreshStatus(tx, id);
@@ -90,6 +97,8 @@ class NotesRepository {
     final size = await target.length();
     final mimeType = lookupMimeType(name) ?? 'application/octet-stream';
     final storagePath = '$noteId/$id';
+    store.log.add('local',
+        'attachment ${shortId(id)} copied ${source.path} → ${target.path} ($size bytes, $mimeType)');
 
     await _db.transaction((tx) async {
       await tx.insert('attachments', {
@@ -117,12 +126,15 @@ class NotesRepository {
       });
       await enqueue(Op.upload, {'path': storagePath});
       await enqueue(Op.setPath, {'path': storagePath});
+      store.log.add('local',
+          'attachment ${shortId(id)} → outbox: create row, upload file to $storagePath, set storage_path');
       await records.refreshStatus(tx, noteId);
     });
     store.notify();
   }
 
   Future<void> keepMine(String id) async {
+    store.log.add('conflict', 'note ${shortId(id)}: user chose keep mine');
     await _db.transaction((tx) async {
       final note = await records.note(tx, id);
       final server = note?.conflictRow;
@@ -171,6 +183,7 @@ class NotesRepository {
   }
 
   Future<void> keepTheirs(String id) async {
+    store.log.add('conflict', 'note ${shortId(id)}: user chose keep theirs');
     final orphanFiles = <String>[];
     await _db.transaction((tx) async {
       final note = await records.note(tx, id);
@@ -224,6 +237,7 @@ class NotesRepository {
   }
 
   Future<void> retryNote(String noteId) async {
+    store.log.add('local', 'note ${shortId(noteId)}: user tapped retry');
     await _db.transaction((tx) async {
       await outbox.retryFailedForNote(tx, noteId);
       await records.refreshStatus(tx, noteId);
@@ -260,6 +274,7 @@ class NotesRepository {
         noteId: id,
         op: Op.create,
         payload: {'title': title, 'body': body});
+    store.log.add('local', 'note ${shortId(id)} created "$title" → outbox: create');
     return id;
   }
 

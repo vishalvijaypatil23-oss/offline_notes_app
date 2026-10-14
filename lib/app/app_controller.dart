@@ -7,6 +7,7 @@ import '../data/models.dart';
 import '../data/notes_repository.dart';
 import '../fake_server.dart';
 import '../sync/sync_engine.dart';
+import '../sync/sync_log.dart';
 
 class AppController extends ChangeNotifier with WidgetsBindingObserver {
   AppController({required this.repository, required this.engine});
@@ -23,6 +24,7 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
   Timer? _syncTimer;
 
   FaultConfig get faults => engine.faults;
+  SyncLog get log => engine.log;
   String? get lastSyncError => engine.lastError;
 
   Future<void> start() async {

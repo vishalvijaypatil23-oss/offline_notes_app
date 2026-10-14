@@ -66,7 +66,7 @@ class Outbox {
     return keys;
   }
 
-  Future<void> noteEdited(
+  Future<bool> noteEdited(
       DatabaseExecutor tx, String noteId, Map<String, Object?> changes) async {
     final open = await openInChain(tx, noteChain(noteId));
     final last = open.isEmpty ? null : open.last;
@@ -74,7 +74,7 @@ class Outbox {
       await _update(tx, last.id, {
         'payload': jsonEncode({...last.payload, ...changes}),
       });
-      return;
+      return true;
     }
     await add(tx,
         entityType: EntityType.note,
@@ -82,6 +82,7 @@ class Outbox {
         noteId: noteId,
         op: Op.update,
         payload: changes);
+    return false;
   }
 
   Future<bool> noteDeleted(DatabaseExecutor tx, String noteId) async {

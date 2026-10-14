@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../app/app_controller.dart';
 import '../data/models.dart';
 import 'queue_inspector_page.dart';
+import 'sync_log_page.dart';
 
 class DebugPage extends StatelessWidget {
   const DebugPage({super.key, required this.controller});
@@ -163,6 +164,13 @@ class DebugPage extends StatelessWidget {
                 title: const Text('Queue inspector'),
                 onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
                   builder: (_) => QueueInspectorPage(controller: controller),
+                )),
+              ),
+              ListTile(
+                leading: const Icon(Icons.receipt_long),
+                title: const Text('Sync log'),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                  builder: (_) => SyncLogPage(log: controller.log),
                 )),
               ),
               ListTile(

@@ -10,6 +10,7 @@ import 'data/local_store.dart';
 import 'data/notes_repository.dart';
 import 'fake_server.dart';
 import 'sync/sync_engine.dart';
+import 'sync/sync_log.dart';
 import 'ui/notes_list_page.dart';
 
 Future<void> main() async {
@@ -17,8 +18,11 @@ Future<void> main() async {
   final support = await getApplicationSupportDirectory();
   final documents = await getApplicationDocumentsDirectory();
 
+  final log = SyncLog(sink: (line) => debugPrint(line));
   final server = FakeServer.open(Directory('${support.path}/fake_server'));
+  log.add('server', 'fake server folder ${support.path}/fake_server');
   final store = await LocalStore.open(
+    log: log,
     dbFactory: databaseFactory,
     dbPath: p.join(support.path, 'notes.db'),
     filesDir: Directory(p.join(documents.path, 'attachments')),

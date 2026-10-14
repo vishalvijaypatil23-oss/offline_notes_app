@@ -11,6 +11,7 @@ import 'backoff.dart';
 import 'conflict.dart';
 import 'outbox.dart';
 import 'records.dart';
+import 'sync_log.dart';
 
 typedef RowApplier = Future<List<String>> Function(
     DatabaseExecutor tx, Map<String, Object?> row);
@@ -47,9 +48,14 @@ class SyncEngine {
 
   FaultConfig get faults => server.faults;
 
+  SyncLog get log => store.log;
+
   Future<void> start() async {
     await store.db.transaction((tx) async {
-      await outbox.recoverInFlight(tx);
+      final recovered = await outbox.recoverInFlight(tx);
+      if (recovered > 0) {
+        log.add('queue', '$recovered job(s) were in flight when the app stopped → back to queued');
+      }
       await _refreshOpenNotes(tx);
     });
     store.notify();
@@ -94,10 +100,14 @@ class SyncEngine {
     if (_requeueNetworkFailures) {
       _requeueNetworkFailures = false;
       await store.db.transaction((tx) async {
-        await outbox.requeueNetworkFailures(tx);
+        final count = await outbox.requeueNetworkFailures(tx);
+        if (count > 0) {
+          log.add('queue', '$count job(s) that failed on network → queued again');
+        }
         await _refreshOpenNotes(tx);
       });
     }
+    log.add('sync', '--- run started · ${await _queueSummary()} ---');
     while (!_disposed) {
       final processed = await Future.wait([_drain(Lane.text), _drain(Lane.file)]);
       if (processed.every((count) => count == 0)) break;
@@ -107,10 +117,19 @@ class SyncEngine {
       _pullFailures = 0;
       lastError = null;
       await store.writeMeta(store.db, 'last_synced_at', '${store.nowMs}');
+      log.add('sync', '--- run finished · ${await _queueSummary()} ---');
     } on NetworkError catch (e) {
       _pullFailures++;
       lastError = e.reason;
+      log.add('pull', 'failed: ${e.reason} → will try again later');
     }
+  }
+
+  Future<String> _queueSummary() async {
+    final rows = await store.db.rawQuery(
+        "SELECT status, COUNT(*) AS n FROM outbox WHERE status != 'done' GROUP BY status");
+    if (rows.isEmpty) return 'queue empty';
+    return rows.map((r) => '${r['status']}: ${r['n']}').join(', ');
   }
 
   Future<void> _scheduleNext() async {
@@ -125,6 +144,7 @@ class SyncEngine {
         if (wait == null || untilEntry < wait) wait = untilEntry;
       }
       if (wait == null || _disposed) return;
+      log.add('sync', 'next automatic try in ${wait.inSeconds}s');
       _timer = Timer(wait, () => sync());
     } catch (e) {
       lastError = '$e';
@@ -145,8 +165,10 @@ class SyncEngine {
 
   Future<void> _process(OutboxEntry entry) async {
     try {
-      await outbox.markInFlight(store.db, entry,
-          baseVersion: await _baseVersionOf(entry));
+      final baseVersion = await _baseVersionOf(entry);
+      log.add('push',
+          '#${entry.id} ${entry.entityType} ${entry.op} ${shortId(entry.entityId)} · attempt ${entry.attempts + 1}${baseVersion == null ? '' : ' · base v$baseVersion'} · ${entry.payload}');
+      await outbox.markInFlight(store.db, entry, baseVersion: baseVersion);
       store.notify();
       if (entry.entityType == EntityType.note) {
         switch (entry.op) {
@@ -192,16 +214,25 @@ class SyncEngine {
   }
 
   Future<void> _retry(OutboxEntry entry, String error, String kind) {
+    final attempt = entry.attempts + 1;
+    final delay = backoff.delayFor(attempt);
+    if (attempt >= Outbox.maxAttempts) {
+      log.add('push', '#${entry.id} $error → gave up after $attempt attempts, marked failed');
+    } else {
+      log.add('push',
+          '#${entry.id} $error → retry in ${(delay.inMilliseconds / 1000).toStringAsFixed(1)}s (attempt $attempt of ${Outbox.maxAttempts})');
+    }
     return store.db.transaction((tx) async {
       await outbox.retryLater(tx, entry,
           error: error,
           kind: kind,
-          delay: backoff.delayFor(entry.attempts + 1));
+          delay: delay);
       await records.refreshStatus(tx, entry.noteId);
     });
   }
 
   Future<void> _fail(OutboxEntry entry, String error, String kind) {
+    log.add('push', '#${entry.id} failed ($kind): $error');
     return store.db.transaction((tx) async {
       await outbox.fail(tx, entry, error: error, kind: kind);
       await records.refreshStatus(tx, entry.noteId);
@@ -219,8 +250,11 @@ class SyncEngine {
     Map<String, Object?> row;
     try {
       row = await server.insert('notes', {'id': entry.entityId, ...entry.payload});
+      log.add('push', '#${entry.id} note created on server → v${row['version']}');
     } on AlreadyExists {
       row = await server.get('notes', entry.entityId) ?? (throw NotFound());
+      log.add('push',
+          '#${entry.id} AlreadyExists → an earlier attempt already landed, using server v${row['version']}');
     }
     final leftover = <String, Object?>{
       for (final e in entry.payload.entries)
@@ -252,6 +286,7 @@ class SyncEngine {
     try {
       final row =
           await server.update('notes', note.id, baseVersion, entry.payload);
+      log.add('push', '#${entry.id} update accepted → v${row['version']}');
       await store.db.transaction((tx) async {
         await outbox.markDone(tx, entry.id);
         await records.adoptServerNote(tx, note.id, row);
@@ -270,6 +305,12 @@ class SyncEngine {
       mine: entry.payload,
       sent: [...entry.sentLog, entry.payload],
     );
+    log.add('conflict',
+        '#${entry.id} server is at v${serverRow['version']}, we sent base v${note.baseVersion} → ${switch (merge.outcome) {
+          MergeOutcome.alreadyApplied => 'our change is already there (lost response), done',
+          MergeOutcome.retry => 'other fields changed only, resending ${merge.toSend.keys.toList()} on top',
+          MergeOutcome.conflict => 'same field changed on both sides, asking the user',
+        }}');
     return store.db.transaction((tx) async {
       switch (merge.outcome) {
         case MergeOutcome.alreadyApplied:
@@ -298,6 +339,7 @@ class SyncEngine {
     final orphanFiles = <String>[];
     try {
       await server.update('notes', note.id, baseVersion, {'deleted': true});
+      log.add('push', '#${entry.id} tombstone accepted → note removed from this device');
       await store.db.transaction((tx) async {
         orphanFiles.addAll(await records.purgeNote(tx, note.id));
       });
@@ -305,6 +347,12 @@ class SyncEngine {
       final serverRow = c.serverRow;
       final outcome =
           mergeDelete(base: note.base, server: serverRow, local: note.fields);
+      log.add('conflict',
+          '#${entry.id} delete hit v${serverRow['version']} → ${switch (outcome) {
+            MergeOutcome.alreadyApplied => 'already deleted on server, done',
+            MergeOutcome.retry => 'no real change there, deleting again',
+            MergeOutcome.conflict => 'edited on another device, asking the user',
+          }}');
       await store.db.transaction((tx) async {
         switch (outcome) {
           case MergeOutcome.alreadyApplied:
@@ -330,9 +378,11 @@ class SyncEngine {
     try {
       row = await server
           .insert('attachments', {'id': entry.entityId, ...entry.payload});
+      log.add('push', '#${entry.id} attachment row created → v${row['version']}');
     } on AlreadyExists {
       row = await server.get('attachments', entry.entityId) ??
           (throw NotFound());
+      log.add('push', '#${entry.id} AlreadyExists → attachment row already there');
     }
     await store.db.transaction((tx) async {
       await tx.update('attachments', {'base_version': row['version']},
@@ -354,6 +404,8 @@ class SyncEngine {
     }
     final bytes = await file.readAsBytes();
     await server.uploadFile(entry.payload['path']! as String, bytes);
+    log.add('push',
+        '#${entry.id} uploaded ${bytes.length} bytes from ${file.path} → server ${entry.payload['path']}');
     await _done(entry);
   }
 
@@ -382,6 +434,7 @@ class SyncEngine {
       row = c.serverRow;
     }
     await store.db.transaction((tx) async {
+      log.add('push', '#${entry.id} storage_path set to $path → attachment fully synced');
       await tx.update(
           'attachments', {'storage_path': path, 'base_version': row['version']},
           where: 'id = ?', whereArgs: [attachment.id]);
@@ -408,6 +461,7 @@ class SyncEngine {
         }
         await store.writeMeta(tx, 'cursor:$table', '$pageEnd');
       });
+      log.add('pull', '$table: ${page.length} change(s) applied, cursor $cursor → $pageEnd');
       cursor = pageEnd;
       await store.deleteFiles(orphanFiles);
       store.notify();
@@ -422,20 +476,29 @@ class SyncEngine {
     final deleted = row['deleted'] == true;
     final local = await records.note(tx, id);
     if (local == null) {
-      if (!deleted) await records.insertServerNote(tx, row);
+      if (!deleted) {
+        await records.insertServerNote(tx, row);
+        log.add('pull', 'note ${shortId(id)} v$version is new → inserted');
+      }
       return const [];
     }
     final noteChain = await outbox.openInChain(tx, Outbox.noteChain(id));
-    if (noteChain.isNotEmpty) return const [];
+    if (noteChain.isNotEmpty) {
+      log.add('pull', 'note ${shortId(id)} v$version skipped, it has pending local changes');
+      return const [];
+    }
     if ((local.baseVersion ?? 0) >= version) return const [];
     if (deleted) {
       if (await outbox.hasOpenForNote(tx, id)) {
         await records.setConflict(tx, id, row);
         await records.refreshStatus(tx, id);
+        log.add('pull', 'note ${shortId(id)} deleted elsewhere but has pending uploads → conflict');
         return const [];
       }
+      log.add('pull', 'note ${shortId(id)} deleted on server → removed here');
       return records.purgeNote(tx, id);
     }
+    log.add('pull', 'note ${shortId(id)} v$version → local copy updated');
     await records.adoptServerNote(tx, id, row);
     await records.refreshStatus(tx, id);
     return const [];
@@ -451,7 +514,7 @@ class SyncEngine {
       if (local == null) return const [];
       await tx.delete('attachments', where: 'id = ?', whereArgs: [id]);
       final localPath = local.localPath;
-      return [if (localPath != null) localPath];
+      return localPath == null ? const [] : [localPath];
     }
     final noteId = row['note_id']! as String;
     if (await records.note(tx, noteId) == null) return const [];
@@ -489,6 +552,7 @@ class SyncEngine {
     final file = store.fileFor(relative);
     await file.parent.create(recursive: true);
     await file.writeAsBytes(bytes, flush: true);
+    log.add('files', 'downloaded $storagePath → ${file.path} (${bytes.length} bytes)');
     await store.db.update('attachments', {'local_path': relative},
         where: 'id = ?', whereArgs: [attachment.id]);
     store.notify();
@@ -498,6 +562,7 @@ class SyncEngine {
   bool simulateOtherDeviceEdit(String noteId, Map<String, Object?> changes) {
     try {
       server.simulateOtherDeviceEdit('notes', noteId, changes);
+      log.add('other device', 'changed note ${shortId(noteId)} on the server: $changes');
       return true;
     } on NotFound {
       return false;

@@ -4,16 +4,18 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:sqflite_common/sqlite_api.dart';
 
+import '../sync/sync_log.dart';
 import 'schema.dart';
 
 class LocalStore {
-  LocalStore._(this.db, this.filesDir, this.clock);
+  LocalStore._(this.db, this.filesDir, this.clock, this.log);
 
   static Future<LocalStore> open({
     required DatabaseFactory dbFactory,
     required String dbPath,
     required Directory filesDir,
     DateTime Function()? clock,
+    SyncLog? log,
   }) async {
     final db = await dbFactory.openDatabase(
       dbPath,
@@ -28,12 +30,16 @@ class LocalStore {
       ),
     );
     await filesDir.create(recursive: true);
-    return LocalStore._(db, filesDir, clock ?? DateTime.now);
+    final syncLog = log ?? SyncLog(clock: clock);
+    syncLog.add('db', 'opened $dbPath');
+    syncLog.add('files', 'attachments are stored in ${filesDir.path}');
+    return LocalStore._(db, filesDir, clock ?? DateTime.now, syncLog);
   }
 
   final Database db;
   final Directory filesDir;
   final DateTime Function() clock;
+  final SyncLog log;
   final _changes = StreamController<void>.broadcast();
 
   Stream<void> get changes => _changes.stream;
@@ -70,6 +76,7 @@ class LocalStore {
     });
     if (await filesDir.exists()) await filesDir.delete(recursive: true);
     await filesDir.create(recursive: true);
+    log.add('db', 'local data wiped, server folder kept');
     notify();
   }
 
