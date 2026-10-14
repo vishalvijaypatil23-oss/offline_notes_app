@@ -223,6 +223,14 @@ class NotesRepository {
     store.notify();
   }
 
+  Future<void> retryNote(String noteId) async {
+    await _db.transaction((tx) async {
+      await outbox.retryFailedForNote(tx, noteId);
+      await records.refreshStatus(tx, noteId);
+    });
+    store.notify();
+  }
+
   Future<void> clearDone() async {
     await outbox.clearDone(_db);
     store.notify();

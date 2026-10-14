@@ -96,6 +96,11 @@ class AppController extends ChangeNotifier with WidgetsBindingObserver {
     _syncSoon();
   }
 
+  Future<void> retryNote(String noteId) async {
+    await repository.retryNote(noteId);
+    _syncSoon();
+  }
+
   Future<void> clearDone() => repository.clearDone();
 
   void setOffline(bool value) {

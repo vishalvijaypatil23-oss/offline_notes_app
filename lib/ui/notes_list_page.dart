@@ -115,6 +115,13 @@ class NotesListPage extends StatelessWidget {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             SyncBadge(note.status),
+                            if (note.status == SyncStatus.failed)
+                              IconButton(
+                                icon: const Icon(Icons.refresh),
+                                tooltip: 'Retry',
+                                color: Colors.red,
+                                onPressed: () => controller.retryNote(note.id),
+                              ),
                             IconButton(
                               icon: const Icon(Icons.edit_outlined),
                               tooltip: 'Edit',

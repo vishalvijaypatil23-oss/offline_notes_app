@@ -154,6 +154,23 @@ void main() {
       expect((await h.repo.note(id))!.status, SyncStatus.synced);
     });
 
+    test('a failed note can be retried on its own', () async {
+      h.server.faults.offline = true;
+      final id = await h.repo.createNote(title: 'retry me', body: '');
+      await h.engine.sync();
+      for (var i = 0; i < 4; i++) {
+        await h.later();
+      }
+      expect((await h.repo.note(id))!.status, SyncStatus.failed);
+
+      h.server.faults.offline = false;
+      await h.repo.retryNote(id);
+      expect((await h.repo.note(id))!.status, SyncStatus.pending);
+
+      await h.engine.sync();
+      expect((await h.repo.note(id))!.status, SyncStatus.synced);
+    });
+
     test('in-flight entries go back to queued on restart and resend safely',
         () async {
       final id = await h.repo.createNote(title: 'crash', body: '');

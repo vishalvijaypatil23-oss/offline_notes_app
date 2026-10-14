@@ -210,6 +210,17 @@ LIMIT 1''', [lane, _now()]);
       where: 'status = ? AND (error_kind IS NULL OR error_kind != ?)',
       whereArgs: [OutboxStatus.failed.value, ErrorKind.conflict]);
 
+  Future<int> retryFailedForNote(DatabaseExecutor db, String noteId) =>
+      db.update(
+          'outbox',
+          {
+            'status': OutboxStatus.queued.value,
+            'attempts': 0,
+            'next_attempt_at': _now(),
+          },
+          where: 'note_id = ? AND status = ? AND (error_kind IS NULL OR error_kind != ?)',
+          whereArgs: [noteId, OutboxStatus.failed.value, ErrorKind.conflict]);
+
   Future<int> clearDone(DatabaseExecutor db) => db.delete('outbox',
       where: 'status = ?', whereArgs: [OutboxStatus.done.value]);
 
